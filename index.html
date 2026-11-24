@@ -34,16 +34,16 @@ function call(endpoint,params){
     const cb='areia_'+Math.random().toString(36).slice(2);
     const tag=document.createElement('script');
     let done=false;
-    const timeout=setTimeout(()=>end(new Error('Sem resposta do Apps Script. Verifique a implantação pública e a conexão.')),18000);
+    const timeout=setTimeout(()=>end(new Error('A solicitação demorou mais que o esperado.')),18000);
     function end(err,data){
       if(done)return;
       done=true;clearTimeout(timeout);delete window[cb];tag.remove();
       if(err)reject(err);
       else if(data && data.ok===true)resolve(data);
-      else reject(new Error(data?.error||'Resposta inesperada do Apps Script.'));
+      else reject(new Error(data?.error||'Não foi possível concluir a solicitação.'));
     }
     window[cb]=data=>end(null,data);
-    tag.onerror=()=>end(new Error('Não foi possível acessar o Apps Script. Confira a URL e o acesso público.'));
+    tag.onerror=()=>end(new Error('Não foi possível concluir a solicitação.'));
     const u=new URL(endpoint);
     Object.entries({...params,callback:cb,_:Date.now()}).forEach(([key,value])=>u.searchParams.set(key,value));
     tag.src=u.href;
@@ -77,11 +77,33 @@ function displayRank(rows){
   });table.append(row);
  });el.append(table);
 }
+// O ranking tenta novamente em caso de falha temporária de conexão.
+// Uma falha de atualização não apaga uma classificação já carregada.
+let rankLoading=false;
 async function loadRank(){
+ if(rankLoading)return;
+ rankLoading=true;
  $('refreshRank').disabled=true;
- try{const result=await call(cfg.endpoint,{action:'rank',game:cfg.game});displayRank(result.rows);}
- catch(e){$('rank').textContent='Ranking online indisponível: '+e.message;}
- finally{$('refreshRank').disabled=false;}
+ const rank=$('rank');
+ const hasTable=()=>Boolean(rank.querySelector('table'));
+ if(!hasTable())rank.textContent='Carregando ranking...';
+ try{
+  let result;
+  try{
+   result=await call(cfg.endpoint,{action:'rank',game:cfg.game});
+  }catch(error){
+   // Segunda tentativa somente para falha de conexão; sem mensagens técnicas na tela.
+   if(navigator.onLine===false)throw error;
+   result=await call(cfg.endpoint,{action:'rank',game:cfg.game});
+  }
+  if(!Array.isArray(result.rows))throw Error('Formato do ranking inválido.');
+  displayRank(result.rows);
+ }catch(_){
+  if(!hasTable())rank.textContent='Não foi possível carregar o ranking.';
+ }finally{
+  rankLoading=false;
+  $('refreshRank').disabled=false;
+ }
 }
 // Envio silencioso e durável: os resultados não impedem novas partidas.
 // O Apps Script trata múltiplos envios da mesma partida de forma idempotente.
@@ -139,7 +161,7 @@ async function flushPending(){
    }catch(err){
     // Falha de rede não faz o resultado reaparecer na tela inicial.
     if(lastResult&&lastResult.id===job.id&&!$('result').hidden){
-     $('storageNote').textContent='Sem confirmação no momento. O envio será tentado novamente quando o jogo for aberto.';
+     $('storageNote').textContent='Resultado ainda não confirmado. Tentaremos enviá-lo novamente.';
     }
     // Segue para a próxima partida; o resultado antigo permanece na fila.
    }
@@ -174,11 +196,8 @@ async function begin(guest=false){
   r.questions.forEach(decodeHint);
   session={id:r.id,questions:r.questions,index:0,answers:[],points:0,hits:0,locked:false,guest};
   $('homeStatus').textContent='';show('play');showQuestion();
- }catch(e){
-  const detail=guest&&/Ação desconhecida/i.test(e.message)
-   ? 'O Apps Script publicado ainda não reconhece Convidado. No Apps Script, use Implantar → Gerenciar implantações → Editar → Nova versão → Implantar.'
-   : e.message;
-  $('homeStatus').textContent='Não foi possível iniciar: '+detail;
+ }catch(_){
+  $('homeStatus').textContent='Não foi possível iniciar. Tente novamente.';
  }
  finally{$('start').disabled=!selectedName;$('guest').disabled=false;}
 }
@@ -250,8 +269,7 @@ function receipt(){
  const data=lastResult;
  if(!data)return;
  const content=[cfg.title,'Aluno: '+(data.name||name),'Acertos: '+data.hits+'/10',
-  'Pontuação informada: '+data.points,'Status: '+(data.guest?'Convidado: sem ranking':data.saved?'Confirmado pelo servidor':'Envio pendente'),
-  'Comprovante informativo. Não substitui o registro do ranking online.'].join('\n');
+  'Pontos: '+data.points,'Registro: '+(data.guest?'Convidado':data.saved?'Confirmado':'Pendente')].join('\n');
  download('resultado_areia.txt',content);
 }
 $('brandText').textContent=cfg.title;$('gameTitle').textContent=cfg.title;
